@@ -50,11 +50,9 @@ def download_and_resize_clip(url, start_time_str, end_time_str, cookies_content=
     ydl_opts = {
         'format': 'best[ext=mp4]/best',  # Prefer single mp4 format to avoid merging
         'outtmpl': temp_download,
-        'merge_output_format': 'mp4',
         'writeinfojson': False,
         'writesubtitles': False,
         'writeautomaticsub': False,
-        'ffmpeg_location': "/usr/bin/ffmpeg" 
     }
     
     # Add cookies if provided
@@ -80,16 +78,21 @@ def download_and_resize_clip(url, start_time_str, end_time_str, cookies_content=
     
     downloaded_file = os.path.join(temp_dir, downloaded_files[0])
     
-    # Check if ffmpeg is available
+    # Check if ffmpeg is available and find its path
+    ffmpeg_path = 'ffmpeg'
     try:
-        subprocess.run(['ffmpeg', '-version'], capture_output=True, check=True)
+        subprocess.run([ffmpeg_path, '-version'], capture_output=True, check=True)
     except (subprocess.CalledProcessError, FileNotFoundError):
-        raise Exception("FFmpeg is not available. Please check system dependencies.")
+        try:
+            ffmpeg_path = '/usr/bin/ffmpeg'
+            subprocess.run([ffmpeg_path, '-version'], capture_output=True, check=True)
+        except (subprocess.CalledProcessError, FileNotFoundError):
+            raise Exception("FFmpeg is not available. Please check system dependencies.")
     
     # Trim the video first
     trimmed_file = os.path.join(temp_dir, 'trimmed.mp4')
     trim_cmd = [
-        'ffmpeg',
+        ffmpeg_path,
         '-ss', str(start_time),
         '-i', downloaded_file,
         '-t', str(duration),
@@ -100,14 +103,14 @@ def download_and_resize_clip(url, start_time_str, end_time_str, cookies_content=
     ]
     
     try:
-        subprocess.run(trim_cmd, check=True, capture_output=True)
+        result = subprocess.run(trim_cmd, check=True, capture_output=True, text=True)
     except subprocess.CalledProcessError as e:
-        raise Exception(f"Failed to trim video: {e.stderr.decode() if e.stderr else str(e)}")
+        raise Exception(f"Failed to trim video: {e.stderr if e.stderr else str(e)}")
     
     # Resize to 9:16 aspect ratio
     resized_file = os.path.join(temp_dir, 'temp_resized.mp4')
     resize_cmd = [
-        "ffmpeg",
+        ffmpeg_path,
         "-i", trimmed_file,
         "-vf", "scale=1080:1920:force_original_aspect_ratio=increase,crop=1080:1920",
         "-c:a", "copy",
@@ -117,9 +120,9 @@ def download_and_resize_clip(url, start_time_str, end_time_str, cookies_content=
     ]
     
     try:
-        subprocess.run(resize_cmd, check=True, capture_output=True)
+        result = subprocess.run(resize_cmd, check=True, capture_output=True, text=True)
     except subprocess.CalledProcessError as e:
-        raise Exception(f"Failed to resize video: {e.stderr.decode() if e.stderr else str(e)}")
+        raise Exception(f"Failed to resize video: {e.stderr if e.stderr else str(e)}")
     
     # Add credits overlay in the last second
     final_file = os.path.join(temp_dir, 'temp_final.mp4')
@@ -132,13 +135,11 @@ def download_and_resize_clip(url, start_time_str, end_time_str, cookies_content=
     # Calculate when to show credits (last 1 second)
     credits_start = max(0, duration - 1)
     
-    # Use a system font that should be available on most systems
-    font_path = "DejaVu Sans"  # This should work on most Linux systems including Streamlit Cloud
-    
+    # Try different font options for Linux systems
     credits_cmd = [
-        "ffmpeg",
+        ffmpeg_path,
         "-i", resized_file,
-        "-vf", f"drawtext=text='{credits_text_escaped}':fontfile='{font_path}':fontsize=36:fontcolor=white:x=(w-text_w)/2:y=h*0.75:enable='between(t,{credits_start},{duration})'",
+        "-vf", f"drawtext=text='{credits_text_escaped}':fontsize=36:fontcolor=white:x=(w-text_w)/2:y=h*0.75:enable='between(t,{credits_start},{duration})'",
         "-c:a", "copy",
         "-preset", "fast",
         "-y",
@@ -146,7 +147,7 @@ def download_and_resize_clip(url, start_time_str, end_time_str, cookies_content=
     ]
     
     try:
-        subprocess.run(credits_cmd, check=True, capture_output=True)
+        result = subprocess.run(credits_cmd, check=True, capture_output=True, text=True)
     except subprocess.CalledProcessError as e:
         # If credits overlay fails, just use the resized video
         st.warning("Credits overlay failed, proceeding without credits")
