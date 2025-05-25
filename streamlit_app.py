@@ -48,12 +48,12 @@ def download_and_resize_clip(url, start_time_str, end_time_str, cookies_content=
     temp_download = os.path.join(temp_dir, 'temp_download.%(ext)s')
     
     ydl_opts = {
-        'format': 'bestvideo+bestaudio/best',
+        'format': 'best[ext=mp4]/best',  # Prefer single mp4 format to avoid merging
         'outtmpl': temp_download,
-        'postprocessors': [{
-            'key': 'FFmpegVideoRemuxer',
-            'preferedformat': 'mp4',
-        }],
+        'merge_output_format': 'mp4',
+        'writeinfojson': False,
+        'writesubtitles': False,
+        'writeautomaticsub': False,
     }
     
     # Add cookies if provided
@@ -65,12 +65,25 @@ def download_and_resize_clip(url, start_time_str, end_time_str, cookies_content=
     
     # Extract video info to get channel name
     with yt_dlp.YoutubeDL(ydl_opts) as ydl:
-        info = ydl.extract_info(url, download=False)
-        channel_name = info.get('uploader', 'Unknown Channel')
-        ydl.download([url])
+        try:
+            info = ydl.extract_info(url, download=False)
+            channel_name = info.get('uploader', 'Unknown Channel')
+            ydl.download([url])
+        except Exception as e:
+            raise Exception(f"Failed to download video: {str(e)}")
     
-    # Find the downloaded file
-    downloaded_file = os.path.join(temp_dir, 'temp_download.mp4')
+    # Find the downloaded file (it might have different extensions)
+    downloaded_files = [f for f in os.listdir(temp_dir) if f.startswith('temp_download')]
+    if not downloaded_files:
+        raise Exception("No video file was downloaded")
+    
+    downloaded_file = os.path.join(temp_dir, downloaded_files[0])
+    
+    # Check if ffmpeg is available
+    try:
+        subprocess.run(['ffmpeg', '-version'], capture_output=True, check=True)
+    except (subprocess.CalledProcessError, FileNotFoundError):
+        raise Exception("FFmpeg is not available. Please check system dependencies.")
     
     # Trim the video first
     trimmed_file = os.path.join(temp_dir, 'trimmed.mp4')
@@ -80,10 +93,15 @@ def download_and_resize_clip(url, start_time_str, end_time_str, cookies_content=
         '-i', downloaded_file,
         '-t', str(duration),
         '-c', 'copy',
+        '-avoid_negative_ts', 'make_zero',
         '-y',
         trimmed_file
     ]
-    subprocess.run(trim_cmd, check=True)
+    
+    try:
+        subprocess.run(trim_cmd, check=True, capture_output=True)
+    except subprocess.CalledProcessError as e:
+        raise Exception(f"Failed to trim video: {e.stderr.decode() if e.stderr else str(e)}")
     
     # Resize to 9:16 aspect ratio
     resized_file = os.path.join(temp_dir, 'temp_resized.mp4')
@@ -92,10 +110,15 @@ def download_and_resize_clip(url, start_time_str, end_time_str, cookies_content=
         "-i", trimmed_file,
         "-vf", "scale=1080:1920:force_original_aspect_ratio=increase,crop=1080:1920",
         "-c:a", "copy",
+        "-preset", "fast",
         "-y",
         resized_file
     ]
-    subprocess.run(resize_cmd, check=True)
+    
+    try:
+        subprocess.run(resize_cmd, check=True, capture_output=True)
+    except subprocess.CalledProcessError as e:
+        raise Exception(f"Failed to resize video: {e.stderr.decode() if e.stderr else str(e)}")
     
     # Add credits overlay in the last second
     final_file = os.path.join(temp_dir, 'temp_final.mp4')
@@ -108,29 +131,36 @@ def download_and_resize_clip(url, start_time_str, end_time_str, cookies_content=
     # Calculate when to show credits (last 1 second)
     credits_start = max(0, duration - 1)
     
-    # Path to Playfair font (assuming it's in the same directory as the script)
-    script_dir = os.path.dirname(os.path.abspath(__file__))
-    font_path = os.path.join(script_dir, "Playfair.ttf")
-    
-    # Check if font exists, fallback to system font if not
-    if not os.path.exists(font_path):
-        # Use a system font as fallback
-        font_path = "/System/Library/Fonts/Helvetica.ttc"
+    # Use a system font that should be available on most systems
+    font_path = "DejaVu Sans"  # This should work on most Linux systems including Streamlit Cloud
     
     credits_cmd = [
         "ffmpeg",
         "-i", resized_file,
         "-vf", f"drawtext=text='{credits_text_escaped}':fontfile='{font_path}':fontsize=36:fontcolor=white:x=(w-text_w)/2:y=h*0.75:enable='between(t,{credits_start},{duration})'",
         "-c:a", "copy",
+        "-preset", "fast",
         "-y",
         final_file
     ]
-    subprocess.run(credits_cmd, check=True)
     
-    # Clean up intermediate files
-    os.remove(downloaded_file)
-    os.remove(trimmed_file)
-    os.remove(resized_file)
+    try:
+        subprocess.run(credits_cmd, check=True, capture_output=True)
+    except subprocess.CalledProcessError as e:
+        # If credits overlay fails, just use the resized video
+        st.warning("Credits overlay failed, proceeding without credits")
+        final_file = resized_file
+    
+    # Clean up intermediate files (but keep the final file)
+    try:
+        if os.path.exists(downloaded_file):
+            os.remove(downloaded_file)
+        if os.path.exists(trimmed_file) and trimmed_file != final_file:
+            os.remove(trimmed_file)
+        if os.path.exists(resized_file) and resized_file != final_file:
+            os.remove(resized_file)
+    except Exception:
+        pass  # Ignore cleanup errors
     
     return final_file
 
