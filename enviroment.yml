@@ -1,4 +1,4 @@
 channels:
   - conda-forge
 dependencies:
-  - ffmpeg=4.3.1
+  - ffmpeg
