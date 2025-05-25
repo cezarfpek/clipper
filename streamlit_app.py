@@ -54,6 +54,7 @@ def download_and_resize_clip(url, start_time_str, end_time_str, cookies_content=
         'writeinfojson': False,
         'writesubtitles': False,
         'writeautomaticsub': False,
+        'ffmpeg_location': "/usr/bin/ffmpeg" 
     }
     
     # Add cookies if provided
