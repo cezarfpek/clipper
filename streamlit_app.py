@@ -20,7 +20,7 @@ def parse_time(time_str):
     else:
         raise ValueError(f"Invalid time format: {time_str}. Use hh:mm:ss, mm:ss, or ss.")
 
-def download_and_resize_clip(url, start_time_str, end_time_str, cookies_content=None):
+def download_and_resize_clip(url, start_time_str, end_time_str, cookies_content=None, progress_bar=None, status_text=None):
     """
     Downloads a YouTube clip and resizes it to 9:16 aspect ratio.
     
@@ -29,6 +29,8 @@ def download_and_resize_clip(url, start_time_str, end_time_str, cookies_content=
         start_time_str (str): Start time in "hh:mm:ss", "mm:ss", or "ss" format.
         end_time_str (str): End time in the same format as start_time_str.
         cookies_content (str, optional): Content of cookies.txt file.
+        progress_bar (streamlit.delta_generator.DeltaGenerator, optional): Streamlit progress bar element.
+        status_text (streamlit.delta_generator.DeltaGenerator, optional): Streamlit text element for status.
     
     Returns:
         str: Path to the processed video file.
@@ -47,12 +49,33 @@ def download_and_resize_clip(url, start_time_str, end_time_str, cookies_content=
     # Download the video and extract channel name
     temp_download = os.path.join(temp_dir, 'temp_download.%(ext)s')
     
+    def my_hook(d):
+        if progress_bar and status_text:
+            if d['status'] == 'downloading':
+                percent_str = d.get('_percent_str', '0.0%')
+                speed_str = d.get('_speed_str', 'N/A')
+                eta_str = d.get('_eta_str', 'N/A')
+                try:
+                    cleaned_percent_str = percent_str.strip('%')
+                    p = float(cleaned_percent_str) / 100.0
+                    progress_bar.progress(p)
+                except ValueError:
+                    progress_bar.progress(0)
+                
+                status_text.text(f"Downloading: {percent_str} at {speed_str} (ETA: {eta_str})")
+            elif d['status'] == 'finished':
+                progress_bar.progress(1.0)
+                status_text.text("Download complete. Initializing processing...")
+            elif d['status'] == 'error':
+                status_text.text("Error during download.")
+
     ydl_opts = {
-        'format': 'bestvideo[ext=mp4]/bestvideo/best[ext=mp4]/best',  # Prioritize best video-only, mp4, then any best video
+        'format': 'bestvideo[ext=mp4]/bestvideo/best[ext=mp4]/best',
         'outtmpl': temp_download,
         'writeinfojson': False,
         'writesubtitles': False,    
         'writeautomaticsub': False,
+        'progress_hooks': [my_hook],
     }
     
     # Add cookies if provided
@@ -65,8 +88,10 @@ def download_and_resize_clip(url, start_time_str, end_time_str, cookies_content=
     # Extract video info to get channel name
     with yt_dlp.YoutubeDL(ydl_opts) as ydl:
         try:
+            if status_text: status_text.text("Extracting video information...")
             info = ydl.extract_info(url, download=False)
             channel_name = info.get('uploader', 'Unknown Channel')
+            if status_text: status_text.text("Starting download...")
             ydl.download([url])
         except Exception as e:
             raise Exception(f"Failed to download video: {str(e)}")
@@ -78,6 +103,7 @@ def download_and_resize_clip(url, start_time_str, end_time_str, cookies_content=
     
     downloaded_file = os.path.join(temp_dir, downloaded_files[0])
     
+    if status_text: status_text.text("Checking FFmpeg...")
     # Check if ffmpeg is available and find its path
     ffmpeg_path = 'ffmpeg'
     try:
@@ -90,14 +116,15 @@ def download_and_resize_clip(url, start_time_str, end_time_str, cookies_content=
             raise Exception("FFmpeg is not available. Please check system dependencies.")
     
     # Trim the video first
+    if status_text: status_text.text("Trimming video...")
     trimmed_file = os.path.join(temp_dir, 'trimmed.mp4')
     trim_cmd = [
         ffmpeg_path,
         '-ss', str(start_time),
         '-i', downloaded_file,
         '-t', str(duration),
-        '-c:v', 'copy',  # Copy video codec
-        '-an',  # No audio
+        '-c:v', 'copy',
+        '-an',
         '-avoid_negative_ts', 'make_zero',
         '-y',
         trimmed_file
@@ -106,15 +133,17 @@ def download_and_resize_clip(url, start_time_str, end_time_str, cookies_content=
     try:
         result = subprocess.run(trim_cmd, check=True, capture_output=True, text=True)
     except subprocess.CalledProcessError as e:
+        if status_text: status_text.text(f"Error trimming video: {e.stderr if e.stderr else str(e)}")
         raise Exception(f"Failed to trim video: {e.stderr if e.stderr else str(e)}")
     
     # Resize to 9:16 aspect ratio
+    if status_text: status_text.text("Resizing video...")
     resized_file = os.path.join(temp_dir, 'temp_resized.mp4')
     resize_cmd = [
         ffmpeg_path,
         "-i", trimmed_file,
         "-vf", "scale=1080:1920:force_original_aspect_ratio=increase,crop=1080:1920",
-        "-an",  # No audio
+        "-an",
         "-preset", "fast",
         "-y",
         resized_file
@@ -123,25 +152,22 @@ def download_and_resize_clip(url, start_time_str, end_time_str, cookies_content=
     try:
         result = subprocess.run(resize_cmd, check=True, capture_output=True, text=True)
     except subprocess.CalledProcessError as e:
+        if status_text: status_text.text(f"Error resizing video: {e.stderr if e.stderr else str(e)}")
         raise Exception(f"Failed to resize video: {e.stderr if e.stderr else str(e)}")
     
     # Add credits overlay in the last second
+    if status_text: status_text.text("Adding credits...")
     final_file = os.path.join(temp_dir, 'temp_final.mp4')
     
-    # Clean the channel name and escape special characters for ffmpeg
     credits_text = f"credits: {channel_name} on Youtube"
-    # Escape special characters for ffmpeg drawtext
     credits_text_escaped = credits_text.replace("'", r"\'").replace(":", r"\:")
-    
-    # Calculate when to show credits (last 1 second)
     credits_start = max(0, duration - 1)
     
-    # Try different font options for Linux systems
     credits_cmd = [
         ffmpeg_path,
         "-i", resized_file,
         "-vf", f"drawtext=text='{credits_text_escaped}':fontsize=36:fontcolor=white:x=(w-text_w)/2:y=h*0.75:enable='between(t,{credits_start},{duration})'",
-        "-an",  # No audio
+        "-an",
         "-preset", "fast",
         "-y",
         final_file
@@ -150,12 +176,14 @@ def download_and_resize_clip(url, start_time_str, end_time_str, cookies_content=
     try:
         result = subprocess.run(credits_cmd, check=True, capture_output=True, text=True)
     except subprocess.CalledProcessError as e:
-        # If credits overlay fails, just use the resized video
+        if status_text: status_text.text("Credits overlay failed, using resized video.")
         st.warning("Credits overlay failed, proceeding without credits")
         final_file = resized_file
     
-    # Clean up intermediate files (but keep the final file)
+    if status_text: status_text.text("Cleaning up temporary files...")
+    
     try:
+        print("Cleaning up temporary files...")
         if os.path.exists(downloaded_file):
             os.remove(downloaded_file)
         if os.path.exists(trimmed_file) and trimmed_file != final_file:
@@ -163,8 +191,9 @@ def download_and_resize_clip(url, start_time_str, end_time_str, cookies_content=
         if os.path.exists(resized_file) and resized_file != final_file:
             os.remove(resized_file)
     except Exception:
-        pass  # Ignore cleanup errors
+        pass
     
+    if status_text: status_text.text("Processing complete!")
     return final_file
 
 def main():
@@ -177,18 +206,15 @@ def main():
     st.title("🎬 YouTube Clip Downloader & Resizer")
     st.markdown("Download YouTube clips and automatically resize them to 9:16 aspect ratio (1080x1920)")
     
-    # Create form
     with st.form("clip_downloader_form"):
         st.subheader("Video Details")
         
-        # URL input
         url = st.text_input(
             "YouTube URL",
             placeholder="https://www.youtube.com/watch?v=...",
             help="Enter the full YouTube video URL"
         )
         
-        # Time inputs
         col1, col2 = st.columns(2)
         with col1:
             start_time = st.text_input(
@@ -204,7 +230,6 @@ def main():
                 help="Format: ss, mm:ss, or hh:mm:ss"
             )
         
-        # Cookie content input
         st.subheader("Optional: Browser Cookies")
         cookies_content = st.text_area(
             "Paste cookies.txt content",
@@ -213,47 +238,54 @@ def main():
             help="Paste the content of your cookies.txt file if the video requires authentication"
         )
         
-        # Submit button
         submitted = st.form_submit_button("Download & Process Clip", type="primary")
     
-    # Process the form submission
     if submitted:
+        progress_bar = st.progress(0)
+        status_text = st.empty()
+
         if not url:
             st.error("Please enter a YouTube URL")
+            progress_bar.empty()
+            status_text.empty()
             return
         
         if not start_time or not end_time:
             st.error("Please enter both start and end times")
+            progress_bar.empty()
+            status_text.empty()
             return
         
         try:
-            # Validate time formats
             parse_time(start_time)
             parse_time(end_time)
         except ValueError as e:
             st.error(f"Invalid time format: {e}")
+            progress_bar.empty()
+            status_text.empty()
             return
         
         try:
-            with st.spinner("Downloading and processing video... This may take a few minutes."):
-                # Download and process the clip
+            with st.spinner("Downloading and processing video... Please wait."):
                 processed_video_path = download_and_resize_clip(
-                    url, start_time, end_time, cookies_content.strip() if cookies_content else None
+                    url, start_time, end_time, 
+                    cookies_content.strip() if cookies_content else None,
+                    progress_bar, status_text
                 )
+                
+                status_text.success("✅ Video processed successfully!")
+                progress_bar.progress(1.0)
                 
                 st.success("✅ Video processed successfully!")
                 
-                # Display video info
                 st.subheader("Processed Video")
                 
-                # Show video player in a much smaller, centered column
                 col1, col2, col3 = st.columns([2, 1, 2])
                 with col2:
                     with open(processed_video_path, 'rb') as video_file:
                         video_bytes = video_file.read()
                         st.video(video_bytes)
                 
-                # Download button
                 filename = f"clip_{start_time.replace(':', '-')}_to_{end_time.replace(':', '-')}.mp4"
                 st.download_button(
                     label="📥 Download Processed Video",
@@ -262,7 +294,6 @@ def main():
                     mime="video/mp4"
                 )
                 
-                # Video details
                 col1, col2, col3 = st.columns(3)
                 with col1:
                     st.metric("Resolution", "1080x1920")
@@ -275,8 +306,9 @@ def main():
         except Exception as e:
             st.error(f"❌ Error processing video: {str(e)}")
             st.error("Please check your URL, time formats, and try again.")
+            if status_text: status_text.error(f"Error: {str(e)}")
+            if progress_bar: progress_bar.empty()
     
-    # Instructions
     with st.expander("ℹ️ Instructions & Tips"):
         st.markdown("""
         ### How to use:
