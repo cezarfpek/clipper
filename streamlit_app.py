@@ -20,7 +20,7 @@ def parse_time(time_str):
     else:
         raise ValueError(f"Invalid time format: {time_str}. Use hh:mm:ss, mm:ss, or ss.")
 
-def download_and_resize_clip(url, start_time_str, end_time_str, cookies_content=None, quality='high'):
+def download_and_resize_clip(url, start_time_str, end_time_str, cookies_content=None):
     """
     Downloads a YouTube clip and resizes it to 9:16 aspect ratio.
     
@@ -29,7 +29,6 @@ def download_and_resize_clip(url, start_time_str, end_time_str, cookies_content=
         start_time_str (str): Start time in "hh:mm:ss", "mm:ss", or "ss" format.
         end_time_str (str): End time in the same format as start_time_str.
         cookies_content (str, optional): Content of cookies.txt file.
-        quality (str): Quality setting - 'high', 'medium', or 'fast'
     
     Returns:
         str: Path to the processed video file.
@@ -48,27 +47,12 @@ def download_and_resize_clip(url, start_time_str, end_time_str, cookies_content=
     # Download the video and extract channel name
     temp_download = os.path.join(temp_dir, 'temp_download.%(ext)s')
     
-    # Improved format selection for better quality
-    if quality == 'high':
-        format_selector = 'bestvideo[height<=2160]+bestaudio/best[height<=2160]/best'
-        crf = '18'  # High quality
-        preset = 'slow'
-    elif quality == 'medium':
-        format_selector = 'bestvideo[height<=1440]+bestaudio/best[height<=1440]/best'
-        crf = '23'  # Medium quality
-        preset = 'medium'
-    else:  # fast
-        format_selector = 'best[height<=1080]/best'
-        crf = '28'  # Lower quality but faster
-        preset = 'fast'
-    
     ydl_opts = {
-        'format': format_selector,
+        'format': 'bestvideo[ext=mp4]/bestvideo/best[ext=mp4]/best',  # Prioritize best video-only, mp4, then any best video
         'outtmpl': temp_download,
         'writeinfojson': False,
-        'writesubtitles': False,
+        'writesubtitles': False,    
         'writeautomaticsub': False,
-        'merge_output_format': 'mp4',  # Ensure mp4 output
     }
     
     # Add cookies if provided
@@ -105,18 +89,15 @@ def download_and_resize_clip(url, start_time_str, end_time_str, cookies_content=
         except (subprocess.CalledProcessError, FileNotFoundError):
             raise Exception("FFmpeg is not available. Please check system dependencies.")
     
-    # Improved trimming with re-encoding for better quality
+    # Trim the video first
     trimmed_file = os.path.join(temp_dir, 'trimmed.mp4')
     trim_cmd = [
         ffmpeg_path,
         '-ss', str(start_time),
         '-i', downloaded_file,
         '-t', str(duration),
-        '-c:v', 'libx264',
-        '-crf', crf,
-        '-preset', preset,
-        '-c:a', 'aac',
-        '-b:a', '128k',
+        '-c:v', 'copy',  # Copy video codec
+        '-an',  # No audio
         '-avoid_negative_ts', 'make_zero',
         '-y',
         trimmed_file
@@ -127,18 +108,14 @@ def download_and_resize_clip(url, start_time_str, end_time_str, cookies_content=
     except subprocess.CalledProcessError as e:
         raise Exception(f"Failed to trim video: {e.stderr if e.stderr else str(e)}")
     
-    # Improved resizing with better scaling algorithm
+    # Resize to 9:16 aspect ratio
     resized_file = os.path.join(temp_dir, 'temp_resized.mp4')
     resize_cmd = [
         ffmpeg_path,
         "-i", trimmed_file,
-        "-vf", "scale=1080:1920:force_original_aspect_ratio=increase:flags=lanczos,crop=1080:1920",
-        "-c:v", "libx264",
-        "-crf", crf,
-        "-preset", preset,
-        "-c:a", "copy",
-        "-pix_fmt", "yuv420p",  # Ensure compatibility
-        "-movflags", "+faststart",  # Better streaming
+        "-vf", "scale=1080:1920:force_original_aspect_ratio=increase,crop=1080:1920",
+        "-an",  # No audio
+        "-preset", "fast",
         "-y",
         resized_file
     ]
@@ -159,15 +136,13 @@ def download_and_resize_clip(url, start_time_str, end_time_str, cookies_content=
     # Calculate when to show credits (last 1 second)
     credits_start = max(0, duration - 1)
     
-    # Improved credits overlay
+    # Try different font options for Linux systems
     credits_cmd = [
         ffmpeg_path,
         "-i", resized_file,
-        "-vf", f"drawtext=text='{credits_text_escaped}':fontsize=48:fontcolor=white:bordercolor=black:borderw=2:x=(w-text_w)/2:y=h*0.75:enable='between(t,{credits_start},{duration})'",
-        "-c:v", "libx264",
-        "-crf", crf,
-        "-preset", preset,
-        "-c:a", "copy",
+        "-vf", f"drawtext=text='{credits_text_escaped}':fontsize=36:fontcolor=white:x=(w-text_w)/2:y=h*0.75:enable='between(t,{credits_start},{duration})'",
+        "-an",  # No audio
+        "-preset", "fast",
         "-y",
         final_file
     ]
@@ -238,15 +213,6 @@ def main():
             help="Paste the content of your cookies.txt file if the video requires authentication"
         )
         
-        # Quality selection
-        st.subheader("Quality Settings")
-        quality = st.selectbox(
-            "Processing Quality",
-            options=['high', 'medium', 'fast'],
-            index=0,
-            help="High: Best quality but slower processing. Medium: Balanced. Fast: Lower quality but faster."
-        )
-        
         # Submit button
         submitted = st.form_submit_button("Download & Process Clip", type="primary")
     
@@ -270,9 +236,9 @@ def main():
         
         try:
             with st.spinner("Downloading and processing video... This may take a few minutes."):
-                # Download and process the clip with quality setting
+                # Download and process the clip
                 processed_video_path = download_and_resize_clip(
-                    url, start_time, end_time, cookies_content.strip() if cookies_content else None, quality
+                    url, start_time, end_time, cookies_content.strip() if cookies_content else None
                 )
                 
                 st.success("✅ Video processed successfully!")
