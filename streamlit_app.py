@@ -155,13 +155,13 @@ def download_and_resize_clip(url, start_time_str, end_time_str, cookies_content=
         if status_text: status_text.text(f"Error resizing video: {e.stderr if e.stderr else str(e)}")
         raise Exception(f"Failed to resize video: {e.stderr if e.stderr else str(e)}")
     
-    # Add credits overlay in the last second
+    # Add credits overlay in the last 5 seconds
     if status_text: status_text.text("Adding credits...")
     final_file = os.path.join(temp_dir, 'temp_final.mp4')
     
     credits_text = f"credits: {channel_name} on Youtube"
     credits_text_escaped = credits_text.replace("'", r"\'").replace(":", r"\:")
-    credits_start = max(0, duration - 1)
+    credits_start = max(0, duration - 5)  # Show credits in the last 5 seconds
     
     credits_cmd = [
         ffmpeg_path,
